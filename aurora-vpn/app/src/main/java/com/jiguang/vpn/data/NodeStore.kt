@@ -7,6 +7,8 @@ import com.jiguang.vpn.model.ProxyNode
 /**
  * 跨页面共享的线路数据(进程内单例)。
  * MainActivity 流式更新订阅后写入,NodePickerActivity 直接读取,避免重复解析。
+ *
+ * v1.0.20:节点携带来源(source),测速按来源分组按需触发。
  */
 object NodeStore {
 
@@ -16,6 +18,11 @@ object NodeStore {
 
     @Volatile
     var tags: List<String> = emptyList()
+        private set
+
+    /** 与 links 一一对应的来源标签(订阅源名),用于按需测速分组。 */
+    @Volatile
+    var sources: List<String> = emptyList()
         private set
 
     @Volatile
@@ -30,16 +37,18 @@ object NodeStore {
     fun clear() {
         links = emptyList()
         tags = emptyList()
+        sources = emptyList()
         selectedIndex = -1
         seen.clear()
     }
 
     /**
      * 追加一批节点(自动排除 ss/ssr),按 URI 去重后重建 links/tags。
+     * @param source 来源标签(订阅源 label);传 null 表示本地缓存加载(沿用原批次分隔)
      * @return 新增条数
      */
     @Synchronized
-    fun append(nodes: List<ProxyNode>): Int {
+    fun append(nodes: List<ProxyNode>, source: String? = null): Int {
         val fresh = ArrayList<Link>(nodes.size)
         for (n in nodes) {
             val low = n.uri.lowercase()
@@ -52,6 +61,8 @@ object NodeStore {
         if (kept.isEmpty()) return 0
         links = links + kept
         tags = tags + keptTags
+        val src = source ?: "?"
+        sources = sources + List(kept.size) { src }
         return kept.size
     }
 

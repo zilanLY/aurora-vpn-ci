@@ -634,7 +634,7 @@ class MainActivity : AppCompatActivity() {
                     NodeStore.clear()
                     firstBatch = false
                 }
-                val added = NodeStore.append(batch.nodes)
+                val added = NodeStore.append(batch.nodes, batch.source.label)
                 if (added > 0) {
                     failed = false
                     note("已加载 ${NodeStore.links.size} 条 · ${batch.source.label}")

@@ -93,14 +93,14 @@ object LatencyEngine {
         notifyChanged()
         scope.launch {
             try {
-                source = "clash"
+                this@LatencyEngine.source = "clash"
                 val onResult: (String, Int) -> Unit = { tag, ms ->
                     values[tag] = ms
                 }
                 val res = LatencyTester.clashApi(NodeStore.tags, onResult)
                 if (res == null) {
                     // Clash API 不可用(内核未就绪等):保留原结果,不覆盖
-                    source = if (values.isEmpty()) "tcp" else source
+                    this@LatencyEngine.source = if (values.isEmpty()) "tcp" else this@LatencyEngine.source
                 } else {
                     persist(ctx)
                     notifyChanged()
@@ -115,22 +115,30 @@ object LatencyEngine {
     }
 
     /**
-     * 增量测速:只补齐没有结果的节点,已有结果直接复用(进线路页时调用,秒出可用列表)。
-     * 与 8h 全量节流(ensureFresh)互不干扰。
+     * 进线路页时的自动测速:**仅默认来源**(其余来源点击分组时才测)。
      */
     fun ensureIncremental() {
+        val def = NodeStore.sources.firstOrNull() ?: return
+        ensureForSource(def)
+    }
+
+    /**
+     * 按需测速指定来源分组:只有点击某个来源时才触发(默认来源由进页自动触发)。
+     * 与增量测速互不干扰:只测该来源的节点。
+     */
+    fun ensureForSource(src: String) {
         val ctx = appContext ?: return
         if (running || rechecking) return
         if (NodeStore.links.isEmpty()) return
-        val missing = NodeStore.tags.filter { !values.containsKey(it) }
-        if (missing.isEmpty()) return
+        val targets = NodeStore.tags.filterIndexed { i, _ -> NodeStore.sources.getOrNull(i) == src }
+        if (targets.isEmpty()) return
         running = true
         notifyChanged()
         scope.launch {
             try {
-                val uriByTag = HashMap<String, String>(missing.size)
+                val uriByTag = HashMap<String, String>(targets.size)
                 NodeStore.tags.forEachIndexed { i, tag ->
-                    if (tag in missing) NodeStore.links.getOrNull(i)?.let { uriByTag[tag] = it.uri }
+                    if (tag in targets) NodeStore.links.getOrNull(i)?.let { uriByTag[tag] = it.uri }
                 }
                 var done = 0
                 val onResult: (String, Int) -> Unit = { tag, ms ->
@@ -141,7 +149,7 @@ object LatencyEngine {
                         notifyChanged()
                     }
                 }
-                source = "tcp"
+                this@LatencyEngine.source = "tcp"
                 LatencyTester.tcpPing(uriByTag, onResult)
             } catch (_: Throwable) {
             } finally {
@@ -150,6 +158,23 @@ object LatencyEngine {
                 notifyChanged()
             }
         }
+    }
+
+    /** 某来源分组是否已有测速结果。 */
+    fun hasResultsForSource(src: String): Boolean {
+        NodeStore.tags.forEachIndexed { i, tag ->
+            if (NodeStore.sources.getOrNull(i) == src && values.containsKey(tag)) return true
+        }
+        return false
+    }
+
+    /** 某来源分组是否正在测速。 */
+    fun isTestingSource(src: String): Boolean {
+        if (!running) return false
+        NodeStore.tags.forEachIndexed { i, tag ->
+            if (NodeStore.sources.getOrNull(i) == src) return true
+        }
+        return false
     }
 
     private fun isFresh(ctx: Context): Boolean {
@@ -187,14 +212,14 @@ object LatencyEngine {
                     }
                 }
                 if (viaClash) {
-                    source = "clash"
+                    this@LatencyEngine.source = "clash"
                     val res = LatencyTester.clashApi(NodeStore.tags, onResult)
                     if (res == null) {
-                        source = "tcp"
+                        this@LatencyEngine.source = "tcp"
                         LatencyTester.tcpPing(uriByTag, onResult)
                     }
                 } else {
-                    source = "tcp"
+                    this@LatencyEngine.source = "tcp"
                     LatencyTester.tcpPing(uriByTag, onResult)
                 }
             } catch (_: Throwable) {

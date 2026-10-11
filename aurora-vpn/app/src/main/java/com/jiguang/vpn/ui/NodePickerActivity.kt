@@ -31,29 +31,30 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 /**
- * 线路选择子页面:
- * - 顶部地区过滤(依据服务器 IP 判定的国家/地区)+ 搜索
- * - 每行显示地区徽章、节点名、协议、延迟(ms,颜色分级)
- * - 进入页面不自动测速,展示引擎已有结果(8h 节流,结果持久化)
- * - 点击节点即选中并返回;「自动优选」= 已测延迟最低的节点
+ * 线路选择子页(v2):
+ * - 顶部来源分组芯片:默认来源进页自动测速,其余来源**点击分组时才测速**
+ * - 组内搜索 + 地区徽章 + 延迟徽章(边测边刷)
+ * - 底部「自动优选」:在已确认可用的节点里选最低延迟
  */
 class NodePickerActivity : AppCompatActivity() {
 
     private lateinit var listContainer: LinearLayout
-    private lateinit var filterBar: LinearLayout
+    private lateinit var chipBar: LinearLayout
     private lateinit var countView: TextView
     private lateinit var hintView: TextView
     private lateinit var searchInput: EditText
+    private lateinit var bestBtn: Button
 
-    private var latencies: MutableMap<String, Int> = HashMap() // key = tag
-    private var activeFilter: String? = null
+    private var latencies: MutableMap<String, Int> = HashMap()
+    private var currentGroup: String? = null
     private var query = ""
     private var density = 1f
 
     private val regionCache = HashMap<Int, String>()
     private var lastRenderedCount = 0
+    private var autoTestKicked = false
 
-    /** 列表重建防抖:测速回调可能高频到来,全量重建列表会掉帧。 */
+    /** 列表重建防抖:测速回调高频到来时避免全量重建掉帧。 */
     private val renderDebounce = android.os.Handler(android.os.Looper.getMainLooper())
     private val renderDebounceRunnable = Runnable { renderList() }
 
@@ -63,54 +64,53 @@ class NodePickerActivity : AppCompatActivity() {
         RegionResolver.init(this)
         LatencyEngine.init(this)
         setContentView(buildLayout())
-        // 只展示引擎已有结果,不在进入列表时自动测速(由 App 进入按 8h 触发)
+
         latencies = LatencyEngine.current().toMutableMap()
-        renderFilter()
+        currentGroup = defaultGroup()
+        renderChips()
         renderList()
-        if (latencies.isEmpty() && LatencyEngine.isRunning()) {
-            showHint("正在测速…")
-        } else if (latencies.isNotEmpty()) {
-            showHint("上次测速结果(${LatencyEngine.sourceLabel()}) · 8 小时后自动刷新")
-        } else {
-            showHint("暂无测速结果,可点击「重新测速」")
-        }
+        updateHint()
         NodeStoreBridge.addListener(storeListener)
         LatencyEngine.addListener(latencyListener)
-        // 进页自动增量补测:只测没结果的节点,已有结果立即展示
-        LatencyEngine.ensureIncremental()
         resolveRegions()
     }
 
     override fun onDestroy() {
         NodeStoreBridge.removeListener(storeListener)
         LatencyEngine.removeListener(latencyListener)
+        renderDebounce.removeCallbacks(renderDebounceRunnable)
         super.onDestroy()
     }
 
-    /** NodeStore 变更回调(流式加载时刷新列表)。 */
+    private fun defaultGroup(): String? = NodeStore.sources.firstOrNull()
+
     private val storeListener: () -> Unit = {
         runOnUiThread {
             if (NodeStore.links.size != lastRenderedCount) {
-                renderFilter()
+                if (currentGroup == null) currentGroup = defaultGroup()
+                renderChips()
                 renderList()
+                maybeAutoTest()
             }
         }
     }
 
-    /** 测速引擎更新回调(进程级,离开页面仍会回调到已销毁页面,需判空)。 */
     private val latencyListener: () -> Unit = {
         runOnUiThread {
             if (isFinishing || isDestroyed) return@runOnUiThread
             latencies = LatencyEngine.current().toMutableMap()
-            if (LatencyEngine.isRunning()) {
-                showHint("正在测速…(${latencies.size} 条已完成)")
-            } else {
-                showHint("测速完成(${LatencyEngine.sourceLabel()}) · ${latencies.size} 条已测")
-            }
-            // 300ms 防抖重建,避免测速回调高频全量重建列表导致掉帧
+            updateHint()
             renderDebounce.removeCallbacks(renderDebounceRunnable)
             renderDebounce.postDelayed(renderDebounceRunnable, 300)
         }
+    }
+
+    /** 默认来源:进页(或数据首次到位)自动测速一次;其余来源点击才测。 */
+    private fun maybeAutoTest() {
+        if (autoTestKicked) return
+        val def = defaultGroup() ?: return
+        autoTestKicked = true
+        LatencyEngine.ensureIncremental()
     }
 
     // ---------- 布局 ----------
@@ -119,9 +119,10 @@ class NodePickerActivity : AppCompatActivity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Theme.BG)
-            setPadding(dp(18), dp(14), dp(18), dp(12))
+            setPadding(dp(16), dp(12), dp(16), dp(12))
         }
 
+        // 顶部:返回 + 标题 + 优选
         val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         val back = Button(this).apply {
             text = "←"
@@ -146,46 +147,31 @@ class NodePickerActivity : AppCompatActivity() {
                 typeface = Typeface.DEFAULT_BOLD
             })
             addView(TextView(this@NodePickerActivity).apply {
-                text = "实时测速 · 地区以服务器 IP 判定"
+                text = "点击来源分组测速 · 默认分组自动测"
                 textSize = 11f
                 setTextColor(Theme.SUBTEXT)
             })
         })
-        header.addView(Button(this).apply {
-            text = "重新测速"
-            isAllCaps = false
-            textSize = 12f
-            setTextColor(Theme.TEXT)
-            background = Theme.ripple(Theme.rounded(Theme.CARD2, 14, density))
-            stateListAnimator = null
-            minHeight = 0; minimumHeight = 0
-            setPadding(dp(12), dp(9), dp(12), dp(9))
-            setOnClickListener { rerunLatency() }
-        })
-        val bestBtn = Button(this).apply {
+        bestBtn = Button(this).apply {
             text = "自动优选"
             isAllCaps = false
             textSize = 12f
             setTextColor(Color.WHITE)
             typeface = Typeface.DEFAULT_BOLD
-            background = Theme.ripple(Theme.rounded(Theme.PRIMARY, 14, density))
+            background = Theme.ripple(Theme.gradient(Theme.GRADIENT_MAIN, 14, density))
             stateListAnimator = null
             minHeight = 0; minimumHeight = 0
-            setPadding(dp(12), dp(9), dp(12), dp(9))
+            setPadding(dp(14), dp(9), dp(14), dp(9))
             setOnClickListener { pickBest() }
         }
-        header.addView(
-            bestBtn,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                .apply { leftMargin = dp(6) }
-        )
+        header.addView(bestBtn)
 
         searchInput = EditText(this).apply {
             hint = "搜索线路名 / 地区"
             textSize = 13f
             setTextColor(Theme.TEXT)
-            setHintTextColor(Theme.SUBTEXT)
-            background = Theme.rounded(Theme.CARD2, 12, density)
+            setHintTextColor(Theme.FAINT)
+            background = Theme.card(12, density)
             setSingleLine(true)
             imeOptions = EditorInfo.IME_ACTION_SEARCH
             setPadding(dp(14), dp(10), dp(14), dp(10))
@@ -207,16 +193,15 @@ class NodePickerActivity : AppCompatActivity() {
         }
 
         countView = TextView(this).apply {
-            text = "0 条线路"
             textSize = 11f
             setTextColor(Theme.SUBTEXT)
-            setPadding(0, dp(10), 0, dp(4))
+            setPadding(0, dp(8), 0, dp(2))
         }
 
-        filterBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val filterScroll = HorizontalScrollView(this).apply {
+        chipBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val chipScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
-            addView(filterBar, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            addView(chipBar, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
 
         hintView = TextView(this).apply {
@@ -235,7 +220,7 @@ class NodePickerActivity : AppCompatActivity() {
         root.addView(header)
         root.addView(searchInput, topMargin(dp(10)))
         root.addView(countView)
-        root.addView(filterScroll, topMargin(dp(4)))
+        root.addView(chipScroll, topMargin(dp(4)))
         root.addView(hintView)
         root.addView(
             scroll,
@@ -248,6 +233,69 @@ class NodePickerActivity : AppCompatActivity() {
         LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             .apply { topMargin = margin }
 
+    // ---------- 来源分组 ----------
+
+    private fun groupList(): List<String> {
+        val seen = linkedSetOf<String>()
+        NodeStore.sources.forEach { seen.add(it) }
+        return seen.toList()
+    }
+
+    private fun groupLabel(src: String): String =
+        if (src == "?") "缓存" else src
+
+    private fun renderChips() {
+        chipBar.removeAllViews()
+        val groups = groupList()
+        if (groups.isEmpty()) return
+        if (currentGroup == null || currentGroup !in groups) currentGroup = groups.first()
+        for (g in groups) {
+            val active = g == currentGroup
+            val count = NodeStore.sources.count { it == g }
+            val chip = Button(this).apply {
+                text = "${groupLabel(g)} $count"
+                isAllCaps = false
+                textSize = 12f
+                stateListAnimator = null
+                minHeight = 0; minimumHeight = 0
+                setPadding(dp(14), dp(8), dp(14), dp(8))
+                setTextColor(if (active) Color.WHITE else Theme.SUBTEXT)
+                typeface = if (active) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                background = Theme.ripple(
+                    if (active) Theme.gradient(Theme.GRADIENT_MAIN, 18, density)
+                    else Theme.card(18, density)
+                )
+                setOnClickListener {
+                    currentGroup = g
+                    renderChips()
+                    renderList()
+                    updateHint()
+                    // 点击分组 = 按需测速:该分组没有结果时立即测
+                    if (!LatencyEngine.hasResultsForSource(g) && !LatencyEngine.isRunning()) {
+                        LatencyEngine.ensureForSource(g)
+                        updateHint()
+                    }
+                }
+            }
+            chipBar.addView(
+                chip,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    .apply { rightMargin = dp(8) }
+            )
+        }
+    }
+
+    private fun updateHint() {
+        val g = currentGroup ?: return
+        hintView.visibility = View.VISIBLE
+        hintView.text = when {
+            LatencyEngine.isTestingSource(g) -> "正在测速「${groupLabel(g)}」…"
+            !LatencyEngine.hasResultsForSource(g) && !LatencyEngine.isRunning() -> "点击上方「${groupLabel(g)}」开始测速"
+            LatencyEngine.isRunning() -> "正在测速…(${latencies.size} 条已完成)"
+            else -> "测速完成(${LatencyEngine.sourceLabel()}) · 共 ${latencies.size} 条已测"
+        }
+    }
+
     // ---------- 地区 ----------
 
     private fun regionFor(index: Int, link: Link): String =
@@ -255,40 +303,11 @@ class NodePickerActivity : AppCompatActivity() {
             RegionResolver.regionOf(this, SingBoxConfig.hostOf(link.uri) ?: "", link.name).region
         }
 
-    private fun renderFilter() {
-        filterBar.removeAllViews()
-        val regions = linkedSetOf("全部")
-        for ((i, l) in NodeStore.links.withIndex()) regions.add(regionFor(i, l))
-        for (r in regions) {
-            val active = (activeFilter == null && r == "全部") || activeFilter == r
-            filterBar.addView(
-                Button(this).apply {
-                    text = r
-                    isAllCaps = false
-                    textSize = 12f
-                    stateListAnimator = null
-                    minHeight = 0; minimumHeight = 0
-                    setPadding(dp(14), dp(7), dp(14), dp(7))
-                    setTextColor(if (active) Color.WHITE else Theme.SUBTEXT)
-                    typeface = if (active) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-                    background = Theme.ripple(Theme.rounded(if (active) Theme.PRIMARY else Theme.CARD2, 16, density))
-                    setOnClickListener {
-                        activeFilter = if (r == "全部") null else r
-                        renderFilter()
-                        renderList()
-                    }
-                },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                    .apply { rightMargin = dp(8) }
-            )
-        }
-    }
-
     // ---------- 列表 ----------
 
     private fun visibleLinks(): List<Int> =
         NodeStore.links.indices
-            .filter { activeFilter == null || regionFor(it, NodeStore.links[it]) == activeFilter }
+            .filter { i -> NodeStore.sources.getOrNull(i) == currentGroup }
             .filter { query.isEmpty() || matches(it) }
             .sortedBy { latencyOf(tagOf(it)) ?: Int.MAX_VALUE }
 
@@ -305,28 +324,15 @@ class NodePickerActivity : AppCompatActivity() {
 
     private fun renderList() {
         lastRenderedCount = NodeStore.links.size
-        val tested = latencies.size
-        countView.text = "${NodeStore.links.size} 条线路 · $tested 条已测速"
+        countView.text = "${NodeStore.links.size} 条线路 · ${latencies.size} 条已测速"
         listContainer.removeAllViews()
         if (NodeStore.links.isEmpty()) {
-            listContainer.addView(TextView(this).apply {
-                text = "正在获取线路…"
-                textSize = 13f
-                setTextColor(Theme.SUBTEXT)
-                gravity = Gravity.CENTER
-                setPadding(0, dp(36), 0, dp(36))
-            })
+            listContainer.addView(emptyView(if (JiguangVpnService.running || isLoadingAnywhere()) "正在获取线路…" else "暂无线路,请在首页刷新订阅"))
             return
         }
         val visible = visibleLinks()
         if (visible.isEmpty()) {
-            listContainer.addView(TextView(this).apply {
-                text = "没有匹配的线路"
-                textSize = 13f
-                setTextColor(Theme.SUBTEXT)
-                gravity = Gravity.CENTER
-                setPadding(0, dp(36), 0, dp(36))
-            })
+            listContainer.addView(emptyView("该分组没有匹配的线路"))
             return
         }
         for (index in visible) {
@@ -343,6 +349,16 @@ class NodePickerActivity : AppCompatActivity() {
         }
     }
 
+    private fun isLoadingAnywhere(): Boolean = LatencyEngine.isRunning()
+
+    private fun emptyView(text: String): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 13f
+        setTextColor(Theme.SUBTEXT)
+        gravity = Gravity.CENTER
+        setPadding(0, dp(36), 0, dp(36))
+    }
+
     @SuppressLint("SetTextI18n")
     private fun nodeRow(index: Int, link: Link): LinearLayout {
         val region = regionFor(index, link)
@@ -352,11 +368,10 @@ class NodePickerActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             background = Theme.ripple(
-                Theme.rounded(
-                    if (selected) Theme.SELECTED_BG else Theme.CARD,
-                    16, density
-                ).apply {
-                    if (selected) setStroke(dp(1), Theme.PRIMARY)
+                if (selected) {
+                    Theme.strokeRounded(Theme.SELECTED_BG, 16, 1, Theme.PRIMARY, density)
+                } else {
+                    Theme.card(16, density)
                 }
             )
             setPadding(dp(13), dp(12), dp(13), dp(12))
@@ -384,7 +399,7 @@ class NodePickerActivity : AppCompatActivity() {
         mid.addView(TextView(this).apply {
             text = protocolOf(link.uri).uppercase(Locale.ROOT)
             textSize = 11f
-            setTextColor(Theme.SUBTEXT)
+            setTextColor(Theme.FAINT)
             setPadding(0, dp(2), 0, 0)
         })
         row.addView(mid)
@@ -394,7 +409,8 @@ class NodePickerActivity : AppCompatActivity() {
                 latency != null && latency >= LatencyTester.TIMEOUT_MS -> "超时"
                 latency != null && latency >= LatencyTester.UNTESTED_MS -> "待测"
                 latency != null -> delayLabel(latency)
-                else -> if (LatencyEngine.isRunning()) "测速中…" else "待测"
+                LatencyEngine.isTestingSource(currentGroup ?: "") -> "…"
+                else -> "未测"
             }
             textSize = 12f
             typeface = Typeface.DEFAULT_BOLD
@@ -404,14 +420,12 @@ class NodePickerActivity : AppCompatActivity() {
                     setTextColor(Theme.PRIMARY)
                     background = Theme.rounded(Theme.CARD2, 10, density)
                 }
-                latency != null && latency >= LatencyTester.UNTESTED_MS -> {
-                    setTextColor(Theme.SUBTEXT)
-                }
+                latency != null && latency >= LatencyTester.UNTESTED_MS -> setTextColor(Theme.FAINT)
                 latency != null -> {
                     setTextColor(delayColor(latency))
                     background = Theme.rounded(Theme.CARD2, 10, density)
                 }
-                else -> setTextColor(Theme.SUBTEXT)
+                else -> setTextColor(Theme.FAINT)
             }
             setPadding(dp(10), dp(5), dp(10), dp(5))
         })
@@ -426,7 +440,7 @@ class NodePickerActivity : AppCompatActivity() {
         "美国" -> Color.rgb(0x2A, 0x3A, 0x6A)
         "韩国" -> Color.rgb(0x2A, 0x5A, 0x6A)
         "英国", "德国", "法国", "荷兰" -> Color.rgb(0x3A, 0x2A, 0x4A)
-        "未知", "其他" -> Theme.CARD2
+        "未知", "其他" -> Theme.BADGE
         else -> Theme.BADGE
     }
 
@@ -440,35 +454,7 @@ class NodePickerActivity : AppCompatActivity() {
 
     private fun protocolOf(uri: String) = uri.substringBefore("://", "unknown").lowercase()
 
-    // ---------- 测速 ----------
-
-    /** 手动重新测速(进程级引擎执行,离开页面也会继续并保存)。 */
-    private fun rerunLatency() {
-        if (NodeStore.links.isEmpty()) {
-            showHint("等待线路加载后再测速")
-            return
-        }
-        showHint("正在测速…")
-        LatencyEngine.rerun(viaClash = JiguangVpnService.running)
-    }
-
-    private fun resolveRegions() {
-        if (NodeStore.isEmpty) return
-        lifecycleScope.launch {
-            // DNS 解析 + ip-api HTTP 请求必须离开主线程,否则列表页会明显卡顿
-            val hosts = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                NodeStore.links.map { SingBoxConfig.hostOf(it.uri) ?: "" }.filter { it.isNotEmpty() }
-            }
-            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                RegionResolver.refreshUnknownOnline(this@NodePickerActivity, hosts)
-            }
-            runOnUiThread {
-                regionCache.clear()
-                renderFilter()
-                renderList()
-            }
-        }
-    }
+    // ---------- 优选 ----------
 
     private fun pickBest() {
         // 只在已确认可用(内核实测或本地探测通过)的节点中优选,超时/待测不参与
@@ -476,7 +462,7 @@ class NodePickerActivity : AppCompatActivity() {
             .filter { it.value < LatencyTester.UNTESTED_MS }
             .minByOrNull { it.value }
         if (best == null) {
-            toast("暂无可用测速结果,请稍候")
+            toast("暂无可用测速结果,请先测速")
             return
         }
         val idx = NodeStore.tags.indexOf(best.key)
@@ -489,9 +475,20 @@ class NodePickerActivity : AppCompatActivity() {
         finish()
     }
 
-    private fun showHint(s: String) {
-        hintView.visibility = View.VISIBLE
-        hintView.text = s
+    private fun resolveRegions() {
+        if (NodeStore.isEmpty) return
+        lifecycleScope.launch {
+            val hosts = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                NodeStore.links.map { SingBoxConfig.hostOf(it.uri) ?: "" }.filter { it.isNotEmpty() }
+            }
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                RegionResolver.refreshUnknownOnline(this@NodePickerActivity, hosts)
+            }
+            runOnUiThread {
+                regionCache.clear()
+                renderList()
+            }
+        }
     }
 
     private fun dp(value: Int): Int = Theme.dp(value, density)

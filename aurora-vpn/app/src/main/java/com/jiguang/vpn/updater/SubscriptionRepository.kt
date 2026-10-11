@@ -18,58 +18,54 @@ import java.util.concurrent.TimeUnit
  * 订阅仓库:负责拉取与解析订阅源,并以**流式**方式逐批产出节点,
  * 让 UI 尽早拿到可用线路,不必等待全部来源加载完成。
  *
- * 来源优先级(默认订阅 = 非 ss 节点最多且体积最小的 [V2RAYFREE]):
- * 1. v2rayfree    — 每日 v2ray base64,约 320 条,~160KB(默认)
- * 2. clashfree    — 每日 Clash YAML,约 327 条,~640KB
- * 3. mibei        — 米贝分享,约 290 条
- * 4. pawdroid     — 约 10 条
- * 5. shaoyou      — base64 + YAML,约 7 条
+ * 来源(v1.0.20 起,v2rayfree 因长期无法直连已移除):
+ * 1. shaoyou      — 默认来源,base64 + YAML,约 7 条
+ * 2. pawdroid     — 约 10 条
+ * 3. clashfree    — 每日 Clash YAML,约 300 条
+ * 4. mibei        — 米贝分享,约 290 条
  *
  * 全部来源自动排除 ss/ssr 协议。
+ * 抓取策略:首签(shao you)单独第一个 emit,其余三源并行抓取,先到先 emit——
+ * 避免单一 GitHub 域名超时阻塞整个列表加载。
  */
 object SubscriptionRepository {
 
-    val DEFAULT_SOURCE = SourceId.V2RAYFREE
+    val DEFAULT_SOURCE = SourceId.SHAOYOU
 
     enum class SourceId(val label: String) {
-        V2RAYFREE("V2RayFree"),
-        CLASHFREE("ClashFree"),
-        MIBEI("米贝分享"),
+        SHAOYOU("ShaoyouFree"),
         PAWDROID("Pawdroid"),
-        SHAOYOU("ShaoyouFree")
+        CLASHFREE("ClashFree"),
+        MIBEI("米贝分享")
     }
 
     /** 单批产出:[source] 为来源标识,null 表示这是收尾批(全部来源结束)。 */
     data class Batch(val source: SourceId?, val nodes: List<ProxyNode>)
 
+    /** 全部启用来源(默认来源在前)。 */
+    fun allSources(): List<SourceId> = SourceId.entries
+
     /**
-     * 流式抓取:按来源优先级顺序,每解析完一个来源立即 emit 一批;
-     * 流结束时 emit 一个 [Batch.source] == null 的收尾批。
+     * 流式抓取:
+     * - 默认来源(shao you)最先单独 emit,保证默认线路秒级可用;
+     * - 其余来源并行发起,每个完成后立即 emit(先到先得);
+     * - 全部结束后 emit 收尾批(source == null)。
      */
     fun stream(): Flow<Batch> = flow {
-        for (source in orderedSources()) {
-            val nodes = try {
-                fetchSource(source)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                emptyList()
+        val def = fetchSingle(DEFAULT_SOURCE)
+        if (def.isNotEmpty()) emit(Batch(DEFAULT_SOURCE, def))
+
+        val rest = allSources().filter { it != DEFAULT_SOURCE }
+        coroutineScope {
+            val deferred = rest.map { src -> async { src to runCatching { fetchSource(src) }.getOrDefault(emptyList()) } }
+            for ((src, nodes) in deferred.awaitAll()) {
+                if (nodes.isNotEmpty()) emit(Batch(src, dedupNonSs(nodes)))
             }
-            if (nodes.isNotEmpty()) emit(Batch(source, dedupNonSs(nodes)))
         }
         emit(Batch(null, emptyList()))
     }.flowOn(Dispatchers.IO)
 
-    private fun orderedSources(): List<SourceId> {
-        val all = listOf(
-            SourceId.V2RAYFREE, SourceId.CLASHFREE, SourceId.MIBEI,
-            SourceId.PAWDROID, SourceId.SHAOYOU
-        )
-        // 默认订阅置顶
-        return listOf(DEFAULT_SOURCE) + all.filter { it != DEFAULT_SOURCE }
-    }
-
-    /** 供单一来源刷新(手动「刷新订阅」仍走多来源流式)。 */
+    /** 单来源抓取(网络在 IO)。 */
     suspend fun fetchSingle(source: SourceId): List<ProxyNode> = withContext(Dispatchers.IO) {
         try {
             dedupNonSs(fetchSource(source))
@@ -81,9 +77,8 @@ object SubscriptionRepository {
     }
 
     private suspend fun fetchSource(source: SourceId): List<ProxyNode> = when (source) {
-        SourceId.V2RAYFREE -> fetchBase64(Endpoints.V2RAYFREE)
-        SourceId.PAWDROID -> fetchBase64(Endpoints.PAWDROID)
         SourceId.SHAOYOU -> fetchBase64(Endpoints.SHAOYOU_TXT) + fetchYaml(Endpoints.SHAOYOU_YAML)
+        SourceId.PAWDROID -> fetchBase64(Endpoints.PAWDROID)
         SourceId.CLASHFREE -> fetchClashFree()
         SourceId.MIBEI -> fetchMiBei()
     }
@@ -169,7 +164,6 @@ object SubscriptionRepository {
         Regex("""https://node\.mibeifenxiang\.com/uploads/\d{4}/\d{2}/\d{8}\.(?:txt|yaml|json)""")
 
     private object Endpoints {
-        const val V2RAYFREE = "https://raw.githubusercontent.com/free-nodes/v2rayfree/main/sub"
         const val PAWDROID = "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub"
         const val SHAOYOU_TXT = "https://raw.githubusercontent.com/shaoyouvip/free/main/base64.txt"
         const val SHAOYOU_YAML = "https://raw.githubusercontent.com/shaoyouvip/free/main/all.yaml"
@@ -183,8 +177,8 @@ internal object Fetcher {
     const val UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36"
 
     private val client = okhttp3.OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(18, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
         .build()
 
     fun get(url: String): String {

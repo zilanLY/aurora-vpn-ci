@@ -6,29 +6,43 @@ import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import kotlin.math.roundToInt
 
-/** 深色仪表盘主题(首页与线路子页共用)。 */
+/**
+ * 深色玻璃拟态主题 v2(首页与线路子页共用)。
+ * 设计语言:近黑底 + 大圆角卡片 + 弱描边分层 + 单一品牌色点缀,
+ * 状态色只用于语义(成功/警告/错误),不参与装饰。
+ */
 object Theme {
 
-    // 背景 / 卡片
-    val BG = Color.rgb(0x0A, 0x0E, 0x1A)
-    val CARD = Color.rgb(0x14, 0x1A, 0x2B)
-    val CARD2 = Color.rgb(0x1D, 0x25, 0x3C)
-    val SELECTED_BG = Color.rgb(0x22, 0x2E, 0x50)
+    // 背景:两层近黑,卡片浮于其上
+    val BG = Color.rgb(0x07, 0x09, 0x12)
+    val BG_ELEVATED = Color.rgb(0x0C, 0x10, 0x1C)
+    val CARD = Color.rgb(0x12, 0x17, 0x26)
+    val CARD2 = Color.rgb(0x1A, 0x21, 0x33)
+    val CARD_STROKE = Color.argb(0x26, 0x8A, 0x9A, 0xC0)   // 弱描边
+    val SELECTED_BG = Color.argb(0x2E, 0x5B, 0x8A, 0xFF)
+    val DIVIDER = Color.argb(0x1E, 0x8A, 0x94, 0xA8)
 
     // 品牌色
-    val PRIMARY = Color.rgb(0x4D, 0x7C, 0xFE)
-    val PRIMARY_DARK = Color.rgb(0x3D, 0x5A, 0xFE)
-    val ACCENT = Color.rgb(0x7C, 0x4D, 0xFF)
+    val PRIMARY = Color.rgb(0x53, 0x82, 0xFD)
+    val PRIMARY_DARK = Color.rgb(0x2E, 0x5A, 0xD8)
+    val ACCENT = Color.rgb(0x8B, 0x5C, 0xF6)
 
     // 状态色
-    val GREEN = Color.rgb(0x2E, 0xC5, 0x6F)
-    val YELLOW = Color.rgb(0xFF, 0xB3, 0x00)
-    val RED = Color.rgb(0xE5, 0x39, 0x35)
+    val GREEN = Color.rgb(0x34, 0xD3, 0x99)
+    val YELLOW = Color.rgb(0xFB, 0xBF, 0x24)
+    val RED = Color.rgb(0xF8, 0x71, 0x71)
+    val ORANGE = Color.rgb(0xFB, 0x92, 0x3C)
 
     // 文本 / 徽章
-    val TEXT = Color.rgb(0xEC, 0xF1, 0xFA)
-    val SUBTEXT = Color.rgb(0x8A, 0x94, 0xA8)
-    val BADGE = Color.rgb(0x35, 0x43, 0x66)
+    val TEXT = Color.rgb(0xF3, 0xF6, 0xFC)
+    val SUBTEXT = Color.rgb(0x8C, 0x96, 0xAD)
+    val FAINT = Color.rgb(0x5A, 0x63, 0x7A)
+    val BADGE = Color.rgb(0x2A, 0x33, 0x4C)
+
+    // 品牌渐变(按钮/英雄区)
+    val GRADIENT_MAIN = intArrayOf(Color.rgb(0x53, 0x82, 0xFD), Color.rgb(0x8B, 0x5C, 0xF6))
+    val GRADIENT_HERO = intArrayOf(Color.rgb(0x0F, 0x1A, 0x3C), Color.rgb(0x1A, 0x12, 0x38))
+    val GRADIENT_STOP = intArrayOf(Color.rgb(0xE5, 0x48, 0x4D), Color.rgb(0xC1, 0x37, 0x3B))
 
     fun dp(value: Int, density: Float): Int = (value * density).roundToInt()
 
@@ -39,13 +53,24 @@ object Theme {
             setColor(color)
         }
 
+    /** 卡片:圆角 + 弱描边(分层感的关键)。 */
+    fun card(radiusDp: Int, density: Float): GradientDrawable =
+        rounded(CARD, radiusDp, density).apply {
+            setStroke(dp(1, density), CARD_STROKE)
+        }
+
+    fun cardBg(color: Int, radiusDp: Int, density: Float): GradientDrawable =
+        rounded(color, radiusDp, density).apply {
+            setStroke(dp(1, density), CARD_STROKE)
+        }
+
     /** 带描边的圆角。 */
     fun strokeRounded(color: Int, radiusDp: Int, strokeDp: Int, strokeColor: Int, density: Float): GradientDrawable =
         rounded(color, radiusDp, density).apply {
             setStroke(dp(strokeDp, density), strokeColor)
         }
 
-    fun pill(color: Int, density: Float): GradientDrawable = rounded(color, 20, density)
+    fun pill(color: Int, density: Float): GradientDrawable = rounded(color, 22, density)
 
     fun oval(color: Int): GradientDrawable = GradientDrawable().apply {
         shape = GradientDrawable.OVAL
