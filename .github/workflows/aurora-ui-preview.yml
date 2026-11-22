@@ -1,0 +1,97 @@
+name: Aurora UI Preview (Private Source)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout private UI branch
+        id: source
+        uses: actions/checkout@v4
+        with:
+          repository: zilanLY/aurora-vpn
+          ref: 261122-refactor-aurora-ui
+          token: ${{ secrets.AURORA_PRIVATE_REPO_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: aurora-private
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Go 1.25
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27
+
+      - name: Build libbox.aar
+        run: |
+          set -euo pipefail
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          gomobile init
+          git clone --depth 1 --branch v1.14.2 https://github.com/SagerNet/sing-box.git /tmp/sing-box
+          mkdir -p "$GITHUB_WORKSPACE/aurora-private/aurora-vpn/app/libs"
+          cd /tmp/sing-box
+          go get golang.org/x/mobile/cmd/gobind
+          gomobile bind -v \
+            -androidapi 23 \
+            -javapkg io.nekohasekai \
+            -target android/arm64,android/arm \
+            -tags "with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0,with_tailscale,ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird" \
+            -ldflags "-X github.com/sagernet/sing-box/constant.Version=1.14.2 -X runtime.godebugDefault=multipathtcp=0,tlssha1=1,tlsunsafeekm=1 -s -w -buildid= -checklinkname=0" \
+            -o "$GITHUB_WORKSPACE/aurora-private/aurora-vpn/app/libs/libbox.aar" \
+            github.com/sagernet/sing-box/experimental/libbox
+          ls -lh "$GITHUB_WORKSPACE/aurora-private/aurora-vpn/app/libs/libbox.aar"
+
+      - name: Run tests and assemble release APK
+        working-directory: aurora-private/aurora-vpn
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew test :app:assembleRelease --no-daemon
+
+      - name: Prepare preview APK
+        id: apk
+        run: |
+          set -euo pipefail
+          APK="$GITHUB_WORKSPACE/aurora-private/aurora-vpn/app/build/outputs/apk/release/app-release.apk"
+          test -f "$APK"
+          cp "$APK" "$GITHUB_WORKSPACE/aurora-ui-preview.apk"
+          sha256sum "$GITHUB_WORKSPACE/aurora-ui-preview.apk"
+          ls -lh "$GITHUB_WORKSPACE/aurora-ui-preview.apk"
+          echo "path=$GITHUB_WORKSPACE/aurora-ui-preview.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Publish APK to private repository
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: zilanLY/aurora-vpn
+          token: ${{ secrets.AURORA_PRIVATE_REPO_TOKEN }}
+          tag_name: ui-aurora-preview
+          target_commitish: ${{ steps.source.outputs.commit }}
+          name: Aurora UI Preview
+          body: |
+            极光客户端界面重构预览版。
+
+            源分支：261122-refactor-aurora-ui
+            源提交：${{ steps.source.outputs.commit }}
+            构建运行：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            此预发布不影响 main 分支和 nightly Release。
+          prerelease: true
+          files: ${{ steps.apk.outputs.path }}
+          overwrite_files: true
